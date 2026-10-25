@@ -29,6 +29,7 @@ import { CommandPaletteModal } from './components/CommandPaletteModal';
 import { ThemeModal } from './components/ThemeModal';
 import { AiSettingsModal } from './components/AiSettingsModal';
 import { AiAssistantPanel } from './components/AiAssistantPanel';
+import { AiApprovalModal } from './components/AiApprovalModal';
 
 import { Radio } from 'lucide-react';
 
@@ -106,12 +107,12 @@ const App: React.FC = () => {
       <PersistentLeftSidebar />
 
       {/* ================= MAIN APPLICATION VIEWPORT ================= */}
-      <div className="flex flex-col flex-1 h-full min-w-0 overflow-hidden">
+      <div className="flex flex-col flex-1 h-full min-w-0 min-h-0 overflow-hidden">
         {/* ================= TOP APPLICATION BAR ================= */}
         <TopBar />
 
       {/* ================= MAIN TERMINAL AREA ================= */}
-      <main className="flex-1 w-full relative overflow-hidden bg-cortex-bg flex flex-row">
+      <main className="flex-1 min-h-0 overflow-hidden flex flex-row w-full relative bg-cortex-bg">
         <div className="flex-1 h-full relative overflow-hidden min-w-0">
           <TerminalGrid registerTermWriter={registerTermWriter} />
         </div>
@@ -187,6 +188,7 @@ const App: React.FC = () => {
       <BackgroundTasksDrawer />
       <WorkflowsModal />
       <AiSettingsModal />
+      <AiApprovalModal />
     </div>
   );
 };

@@ -8,6 +8,7 @@ import {
   runAiPilotPrompt,
   clearAiPilotSteps,
   toggleAiSettings,
+  stopAiAssistant,
 } from '../stores/aetherStore';
 import {
   Sparkles,
@@ -22,6 +23,7 @@ import {
   AlertCircle,
   Settings,
   Clock,
+  Square,
 } from 'lucide-react';
 
 export const OrchestratorBar: React.FC = () => {
@@ -229,7 +231,13 @@ export const OrchestratorBar: React.FC = () => {
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') handleExecute();
-              if (e.key === 'Escape') toggleOrchestrator(false);
+              if (e.key === 'Escape') {
+                if (store.aiPilotRunning) {
+                  stopAiAssistant();
+                } else {
+                  toggleOrchestrator(false);
+                }
+              }
             }}
             placeholder={
               mode === 'pilot'
@@ -239,27 +247,30 @@ export const OrchestratorBar: React.FC = () => {
             className="flex-1 bg-transparent text-sm text-white placeholder-tokyo-comment focus:outline-none font-mono"
           />
 
-          <button
-            onClick={handleExecute}
-            disabled={store.aiPilotRunning || !query.trim()}
-            className={`px-3 py-1.5 rounded-md font-semibold text-xs flex items-center gap-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-              mode === 'pilot'
-                ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm'
-                : 'bg-tokyo-blue hover:bg-tokyo-cyan text-tokyo-bgDark'
-            }`}
-          >
-            {store.aiPilotRunning ? (
-              <>
-                <RefreshCw className="w-3 h-3 animate-spin" />
-                <span>Piloting...</span>
-              </>
-            ) : (
-              <>
-                <span>Run</span>
-                <Send className="w-3 h-3" />
-              </>
-            )}
-          </button>
+          {store.aiPilotRunning ? (
+            <button
+              onClick={() => stopAiAssistant()}
+              title="Stop Autonomous Pilot Agent (Esc)"
+              className="px-3 py-1.5 rounded-md font-semibold text-xs flex items-center gap-1.5 transition-colors bg-cortex-error/20 hover:bg-cortex-error/30 text-cortex-error border border-cortex-error/40 cursor-pointer shadow-sm"
+              data-testid="orchestrator-stop-btn"
+            >
+              <Square className="w-3 h-3 fill-current" />
+              <span>Stop</span>
+            </button>
+          ) : (
+            <button
+              onClick={handleExecute}
+              disabled={!query.trim()}
+              className={`px-3 py-1.5 rounded-md font-semibold text-xs flex items-center gap-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                mode === 'pilot'
+                  ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm'
+                  : 'bg-tokyo-blue hover:bg-tokyo-cyan text-tokyo-bgDark'
+              }`}
+            >
+              <span>Run</span>
+              <Send className="w-3 h-3" />
+            </button>
+          )}
         </div>
 
         {/* Pilot Execution Steps & Live Progress Logging */}
@@ -271,10 +282,19 @@ export const OrchestratorBar: React.FC = () => {
                 <span>Pilot Supervisor Live Action Log</span>
               </span>
               {store.aiPilotRunning && (
-                <span className="text-[10px] text-cyan-400 flex items-center gap-1">
-                  <RefreshCw className="w-3 h-3 animate-spin" />
-                  <span>Autonomous cycle in progress...</span>
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-cyan-400 flex items-center gap-1">
+                    <RefreshCw className="w-3 h-3 animate-spin" />
+                    <span>Autonomous cycle in progress...</span>
+                  </span>
+                  <button
+                    onClick={() => stopAiAssistant()}
+                    className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-cortex-error/20 hover:bg-cortex-error/30 text-cortex-error border border-cortex-error/40 text-[10px] font-mono cursor-pointer transition-colors"
+                  >
+                    <Square className="w-2.5 h-2.5 fill-current" />
+                    <span>Stop</span>
+                  </button>
+                </div>
               )}
             </div>
 

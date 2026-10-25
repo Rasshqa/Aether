@@ -181,7 +181,7 @@ export const ObsidianSidebar: React.FC = () => {
 
   return (
     <aside
-      className="fixed inset-y-0 right-0 z-40 w-96 max-w-full bg-slate-950/95 backdrop-blur-md border-l border-slate-800/80 shadow-2xl flex flex-col transition-all duration-300 select-none"
+      className="fixed inset-y-0 right-0 z-40 w-96 max-w-full h-full min-h-0 max-h-full bg-slate-950/95 backdrop-blur-md border-l border-slate-800/80 shadow-2xl flex flex-col overflow-hidden transition-all duration-300 select-none"
       aria-label="Obsidian & Blackboard Drawer"
     >
       {/* Header */}
@@ -231,7 +231,7 @@ export const ObsidianSidebar: React.FC = () => {
       </div>
 
       {/* Content Container */}
-      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4 font-sans text-xs">
+      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain pointer-events-auto px-4 py-3 space-y-4 font-sans text-xs">
         {/* ================= TAB 1: BLACKBOARD ================= */}
         {activeTab === 'blackboard' && (
           <div className="space-y-4">

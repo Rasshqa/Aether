@@ -97,6 +97,17 @@ body {
   background: var(--cortex-accent);
 }
 
+/* Ensure nested scroll containers always receive mouse wheel and pointer events smoothly */
+.overflow-y-auto,
+.overflow-y-scroll,
+.overflow-auto {
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: var(--cortex-border-strong) transparent;
+  overscroll-behavior-y: contain;
+  pointer-events: auto;
+}
+
 /* XTerm custom overrides */
 .xterm {
   padding: 6px 10px;

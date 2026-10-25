@@ -169,15 +169,15 @@ const WorkspaceDrivePanel: React.FC = () => {
 
   useEffect(() => {
     void loadDirectory('');
-  }, [loadDirectory]);
+  }, [loadDirectory, store.obsidianRefreshTick]);
 
   useEffect(() => {
     for (const p of store.aetherDriveExpandedPaths) {
-      if (!treeCache[p]) {
+      if (!treeCache[p] || store.obsidianRefreshTick > 0) {
         void loadDirectory(p);
       }
     }
-  }, [store.aetherDriveExpandedPaths, treeCache, loadDirectory]);
+  }, [store.aetherDriveExpandedPaths, treeCache, loadDirectory, store.obsidianRefreshTick]);
 
   useEffect(() => {
     if (store.aetherDriveActiveTab === 'workflows') {
@@ -386,7 +386,7 @@ const WorkspaceDrivePanel: React.FC = () => {
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 overflow-hidden animate-slideDown" data-testid="aether-drive-sidebar">
+    <div className="h-full min-h-0 max-h-full flex flex-col overflow-hidden shrink-0 flex-1 animate-slideDown" data-testid="aether-drive-sidebar">
       {/* Workspace path label */}
       <div className="px-3 py-1.5 border-b border-cortex-border flex items-center justify-between text-[10px] text-cortex-textMuted">
         <span className="truncate font-mono" title={activeWorktree}>
@@ -446,7 +446,7 @@ const WorkspaceDrivePanel: React.FC = () => {
       {/* Tab: Files */}
       {store.aetherDriveActiveTab === 'tree' && (
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-          <div className="flex-1 overflow-y-auto p-1 space-y-px" data-testid="file-tree-container">
+          <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain pointer-events-auto p-1 space-y-px" data-testid="file-tree-container">
             {loadingPaths.has('') && !treeCache[''] ? (
               <div className="flex items-center justify-center p-6 text-xs text-cortex-textMuted gap-2">
                 <RefreshCw className="w-3.5 h-3.5 animate-spin text-cortex-accent" />
@@ -580,7 +580,7 @@ const WorkspaceDrivePanel: React.FC = () => {
             <span>{searchResults.length} matches</span>
           </div>
 
-          <div className="flex-1 overflow-y-auto space-y-1.5" data-testid="search-results-list">
+          <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain pointer-events-auto space-y-1.5" data-testid="search-results-list">
             {searching ? (
               <div className="flex items-center justify-center p-6 text-xs text-cortex-textMuted gap-2">
                 <RefreshCw className="w-3.5 h-3.5 animate-spin text-cortex-accent" />
@@ -669,7 +669,7 @@ const WorkspaceDrivePanel: React.FC = () => {
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto space-y-1.5" data-testid="workflows-list">
+          <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain pointer-events-auto space-y-1.5" data-testid="workflows-list">
             {filteredWorkflows.length === 0 ? (
               <div className="p-4 text-xs text-cortex-textMuted text-center font-mono">
                 No workflows match filter.
@@ -814,7 +814,7 @@ export const PersistentLeftSidebar: React.FC<PersistentLeftSidebarProps> = ({
 
   return (
     <aside
-      className={`${sidebarWidth} h-screen flex flex-col shrink-0 select-none bg-cortex-bgAlt border-r border-cortex-border font-sans z-30 transition-all duration-200`}
+      className={`${sidebarWidth} h-full min-h-0 max-h-full flex flex-col overflow-hidden shrink-0 select-none bg-cortex-bgAlt border-r border-cortex-border font-sans z-30 transition-all duration-200`}
       data-testid="persistent-left-sidebar"
     >
       {/* Brand Header */}
@@ -958,9 +958,9 @@ export const PersistentLeftSidebar: React.FC<PersistentLeftSidebarProps> = ({
         </button>
       </nav>
 
-      {/* Workspace Drive content — inline when active and not minimized */}
+      {/* Workspace Drive content: inline when active and not minimized */}
       {!isMinimized && isWorkspaceActive && (
-        <div className="flex-1 min-h-0 overflow-hidden border-t border-cortex-border">
+        <div className="flex-1 min-h-0 max-h-full overflow-hidden border-t border-cortex-border flex flex-col shrink-0">
           <WorkspaceDrivePanel />
         </div>
       )}

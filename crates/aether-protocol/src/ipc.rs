@@ -164,6 +164,26 @@ pub enum IpcRequestPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         history: Option<Vec<ChatHistoryEntry>>,
     },
+
+    // Workspace File System Access (AI Assistant & Tools)
+    FsListDirectory {
+        root_path: String,
+        recursive: bool,
+        max_depth: usize,
+    },
+    FsReadFile {
+        file_path: String,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+    },
+    FsWriteOrEditFile {
+        file_path: String,
+        operation: String, // "write" | "replace_lines" | "apply_patch"
+        content: String,
+    },
+    FsDeletePath {
+        file_path: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -360,6 +380,31 @@ pub enum IpcResponsePayload {
     AiChatResult {
         content: String,
     },
+    FsDirectoryListing {
+        entries: Vec<FsEntryInfo>,
+    },
+    FsFileContent {
+        file_path: String,
+        content: String,
+        start_line: usize,
+        end_line: usize,
+        total_lines: usize,
+    },
+    FsFileModified {
+        file_path: String,
+        bytes_written: usize,
+    },
+    FsPathDeleted {
+        file_path: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FsEntryInfo {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -575,6 +620,11 @@ pub enum IpcEvent {
         pane_id: String,
         step: String,
         details: Option<String>,
+    },
+    /// Workspace file created, modified, or deleted by AI or tools
+    WorkspaceFileChanged {
+        file_path: String,
+        operation: String,
     },
 }
 

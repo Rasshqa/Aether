@@ -202,7 +202,7 @@ describe('Milestone 1 Challenger Stress & Property Tests', () => {
     it('resiliently handles localStorage quota or security exceptions during theme apply', () => {
       storageShouldThrow = true;
 
-      // applyTheme wraps localStorage in try/catch — must not throw exception to caller
+      // applyTheme wraps localStorage in try/catch: must not throw exception to caller
       assert.doesNotThrow(() => {
         applyTheme('aethercortex-light');
       }, 'applyTheme must not crash when localStorage.setItem throws');

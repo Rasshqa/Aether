@@ -15,6 +15,7 @@ import {
   deleteAiSession,
   clearCurrentAiSession,
   AI_COMMANDS,
+  stopAiAssistant,
 } from '../stores/aetherStore';
 import type { AiMessage, AiSession, AiCommandDefinition } from '../stores/aetherStore';
 import {
@@ -33,6 +34,7 @@ import {
   Edit2,
   X,
   Command,
+  Square,
 } from 'lucide-react';
 
 export interface AiAssistantPanelProps {
@@ -561,6 +563,12 @@ export const AiAssistantPanel: React.FC<AiAssistantPanelProps> = ({
       }
     }
 
+    if (e.key === 'Escape' && store.aiLoading) {
+      e.preventDefault();
+      stopAiAssistant();
+      return;
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -886,13 +894,26 @@ export const AiAssistantPanel: React.FC<AiAssistantPanelProps> = ({
         )}
 
         {store.aiLoading && (
-          <div className="flex items-start gap-3" data-testid="ai-loading-indicator">
-            <AiAvatar />
-            <div className="flex items-center gap-1.5 pt-2.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-bounce" style={{ animationDelay: '0ms' }} />
-              <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-bounce" style={{ animationDelay: '150ms' }} />
-              <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+          <div className="flex items-center justify-between p-2 rounded-lg bg-sky-950/20 border border-sky-800/30 mb-2" data-testid="ai-loading-indicator">
+            <div className="flex items-center gap-2">
+              <AiAvatar />
+              <div className="flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+              </div>
+              <span className="text-[11px] text-cortex-textMuted font-mono">Agent working...</span>
             </div>
+            <button
+              type="button"
+              onClick={() => stopAiAssistant()}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-cortex-error/20 hover:bg-cortex-error/30 text-cortex-error border border-cortex-error/40 text-xs font-mono font-bold transition-colors cursor-pointer"
+              data-testid="btn-stop-agent-pill"
+              title="Stop Agent Execution (Esc)"
+            >
+              <Square className="w-3 h-3 fill-current" />
+              <span>Stop Agent (Esc)</span>
+            </button>
           </div>
         )}
 
@@ -964,16 +985,29 @@ export const AiAssistantPanel: React.FC<AiAssistantPanelProps> = ({
             placeholder="Tanya Aether atau ketik / untuk command..."
             className="flex-1 bg-transparent text-[13px] text-cortex-text placeholder:text-[#7E8F9B] resize-none focus:outline-none font-sans leading-relaxed min-h-[24px] max-h-[120px]"
           />
-          <button
-            type="button"
-            onClick={handleSend}
-            disabled={!inputVal.trim() || store.aiLoading}
-            data-testid="ai-panel-send-button"
-            className="w-8 h-8 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 flex items-center justify-center shrink-0 transition-all shadow-sm active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ml-2"
-            title="Kirim (Enter)"
-          >
-            <Send className="w-4 h-4 fill-slate-950 stroke-slate-950" />
-          </button>
+          {store.aiLoading ? (
+            <button
+              type="button"
+              onClick={() => stopAiAssistant()}
+              data-testid="ai-panel-stop-button"
+              className="px-3 py-1.5 rounded-lg bg-cortex-error hover:bg-rose-500 text-white flex items-center gap-1.5 shrink-0 transition-all shadow-md active:scale-95 font-sans font-semibold text-xs ml-2 cursor-pointer"
+              title="Stop Agent (Esc)"
+            >
+              <Square className="w-3.5 h-3.5 fill-current" />
+              <span>Stop</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={!inputVal.trim()}
+              data-testid="ai-panel-send-button"
+              className="w-8 h-8 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 flex items-center justify-center shrink-0 transition-all shadow-sm active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ml-2"
+              title="Kirim (Enter)"
+            >
+              <Send className="w-4 h-4 fill-slate-950 stroke-slate-950" />
+            </button>
+          )}
         </div>
       </div>
     </aside>

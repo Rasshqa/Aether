@@ -926,6 +926,105 @@ pub async fn cmd_read_workspace_file(
     read_workspace_file_impl(&root, &relative_path, max_bytes)
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct FsReadFileResponse {
+    pub file_path: String,
+    pub content: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub total_lines: usize,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct FsWriteFileResponse {
+    pub file_path: String,
+    pub bytes_written: usize,
+}
+
+#[tauri::command]
+pub async fn cmd_fs_list_directory(
+    root_path: Option<String>,
+    recursive: Option<bool>,
+    max_depth: Option<usize>,
+    state: State<'_, GuiBridgeState>,
+) -> Result<Vec<aether_protocol::ipc::FsEntryInfo>, String> {
+    let payload = IpcRequestPayload::FsListDirectory {
+        root_path: root_path.unwrap_or_else(|| ".".to_string()),
+        recursive: recursive.unwrap_or(true),
+        max_depth: max_depth.unwrap_or(5),
+    };
+    match state.send_request(payload).await? {
+        IpcResponsePayload::FsDirectoryListing { entries } => Ok(entries),
+        other => Err(format!("Unexpected response payload: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn cmd_fs_read_file(
+    file_path: String,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    state: State<'_, GuiBridgeState>,
+) -> Result<FsReadFileResponse, String> {
+    let payload = IpcRequestPayload::FsReadFile {
+        file_path,
+        start_line,
+        end_line,
+    };
+    match state.send_request(payload).await? {
+        IpcResponsePayload::FsFileContent {
+            file_path,
+            content,
+            start_line,
+            end_line,
+            total_lines,
+        } => Ok(FsReadFileResponse {
+            file_path,
+            content,
+            start_line,
+            end_line,
+            total_lines,
+        }),
+        other => Err(format!("Unexpected response payload: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn cmd_fs_write_or_edit_file(
+    file_path: String,
+    operation: String,
+    content: String,
+    state: State<'_, GuiBridgeState>,
+) -> Result<FsWriteFileResponse, String> {
+    let payload = IpcRequestPayload::FsWriteOrEditFile {
+        file_path,
+        operation,
+        content,
+    };
+    match state.send_request(payload).await? {
+        IpcResponsePayload::FsFileModified {
+            file_path,
+            bytes_written,
+        } => Ok(FsWriteFileResponse {
+            file_path,
+            bytes_written,
+        }),
+        other => Err(format!("Unexpected response payload: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn cmd_fs_delete_path(
+    file_path: String,
+    state: State<'_, GuiBridgeState>,
+) -> Result<String, String> {
+    let payload = IpcRequestPayload::FsDeletePath { file_path };
+    match state.send_request(payload).await? {
+        IpcResponsePayload::FsPathDeleted { file_path } => Ok(file_path),
+        other => Err(format!("Unexpected response payload: {:?}", other)),
+    }
+}
+
 #[derive(Deserialize)]
 struct RgJsonMessage {
     r#type: String,

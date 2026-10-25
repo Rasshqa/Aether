@@ -11,6 +11,7 @@ import {
   togglePaneInputBar,
   BUILT_IN_PROVIDERS,
   AGENT_PALETTES,
+  stopAiAssistant,
 } from '../stores/aetherStore';
 import {
   CornerDownLeft,
@@ -21,6 +22,7 @@ import {
   CheckCircle2,
   AlertCircle,
   Cpu,
+  Square,
 } from 'lucide-react';
 import { classifyCommand } from '../utils/commandClassifier';
 import type { ClassificationResult } from '../utils/commandClassifier';
@@ -415,20 +417,32 @@ export const InputBar: React.FC<InputBarProps> = ({
           )}
         </div>
 
-        {/* Run / Execute Button */}
-        <button
-          onClick={submit}
-          className="mt-0.5 shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#00F0FF] hover:bg-[#00F0FF]/80 text-[#050809] text-xs font-semibold transition-colors shadow-sm"
-          title="Execute (Enter)"
-          data-testid="inputbar-submit-btn"
-        >
-          {mode === 'ai' ? (
-            <Sparkles className="w-3.5 h-3.5" />
-          ) : (
-            <CornerDownLeft className="w-3.5 h-3.5" />
-          )}
-          <span>Run</span>
-        </button>
+        {/* Run / Stop Button */}
+        {store.aiLoading || store.aiPilotRunning ? (
+          <button
+            onClick={() => stopAiAssistant()}
+            className="mt-0.5 shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded bg-cortex-error hover:bg-rose-500 text-white text-xs font-semibold transition-colors shadow-sm cursor-pointer"
+            title="Stop Agent (Esc)"
+            data-testid="inputbar-stop-btn"
+          >
+            <Square className="w-3.5 h-3.5 fill-current" />
+            <span>Stop</span>
+          </button>
+        ) : (
+          <button
+            onClick={submit}
+            className="mt-0.5 shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#00F0FF] hover:bg-[#00F0FF]/80 text-[#050809] text-xs font-semibold transition-colors shadow-sm"
+            title="Execute (Enter)"
+            data-testid="inputbar-submit-btn"
+          >
+            {mode === 'ai' ? (
+              <Sparkles className="w-3.5 h-3.5" />
+            ) : (
+              <CornerDownLeft className="w-3.5 h-3.5" />
+            )}
+            <span>Run</span>
+          </button>
+        )}
       </div>
 
       {/* Footer shortcut helper */}

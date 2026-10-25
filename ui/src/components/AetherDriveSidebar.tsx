@@ -152,18 +152,18 @@ export const AetherDriveSidebar: React.FC = () => {
     if (store.aetherDriveSidebarOpen) {
       void loadDirectory('');
     }
-  }, [store.aetherDriveSidebarOpen, loadDirectory]);
+  }, [store.aetherDriveSidebarOpen, loadDirectory, store.obsidianRefreshTick]);
 
   // Load expanded folders from store
   useEffect(() => {
     if (store.aetherDriveSidebarOpen) {
       for (const p of store.aetherDriveExpandedPaths) {
-        if (!treeCache[p]) {
+        if (!treeCache[p] || store.obsidianRefreshTick > 0) {
           void loadDirectory(p);
         }
       }
     }
-  }, [store.aetherDriveSidebarOpen, store.aetherDriveExpandedPaths, treeCache, loadDirectory]);
+  }, [store.aetherDriveSidebarOpen, store.aetherDriveExpandedPaths, treeCache, loadDirectory, store.obsidianRefreshTick]);
 
   // Sync workflows when switching to workflows tab
   useEffect(() => {
@@ -401,7 +401,7 @@ export const AetherDriveSidebar: React.FC = () => {
 
   return (
     <aside
-      className="w-80 border-r border-slate-800 shrink-0 h-full flex flex-col bg-slate-950/95 backdrop-blur z-20 select-none text-slate-200 font-mono"
+      className="w-80 border-r border-slate-800 shrink-0 h-full min-h-0 max-h-full flex flex-col overflow-hidden bg-slate-950/95 backdrop-blur z-20 select-none text-slate-200 font-mono"
       data-testid="aether-drive-sidebar"
     >
       {/* ================= HEADER ================= */}
@@ -486,7 +486,7 @@ export const AetherDriveSidebar: React.FC = () => {
       {store.aetherDriveActiveTab === 'tree' && (
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
           {/* File Tree List */}
-          <div className="flex-1 overflow-y-auto p-1.5 space-y-0.5" data-testid="file-tree-container">
+          <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain pointer-events-auto p-1.5 space-y-0.5" data-testid="file-tree-container">
             {loadingPaths.has('') && !treeCache[''] ? (
               <div className="flex items-center justify-center p-6 text-xs text-slate-500 gap-2">
                 <RefreshCw className="w-4 h-4 animate-spin text-cyan-400" />
@@ -642,7 +642,7 @@ export const AetherDriveSidebar: React.FC = () => {
           </div>
 
           {/* Results List */}
-          <div className="flex-1 overflow-y-auto space-y-2 pr-1" data-testid="search-results-list">
+          <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain pointer-events-auto space-y-2 pr-1" data-testid="search-results-list">
             {searching ? (
               <div className="flex items-center justify-center p-6 text-xs text-slate-500 gap-2">
                 <RefreshCw className="w-4 h-4 animate-spin text-cyan-400" />
@@ -744,7 +744,7 @@ export const AetherDriveSidebar: React.FC = () => {
           )}
 
           {/* Workflows List */}
-          <div className="flex-1 overflow-y-auto space-y-1.5 pr-1" data-testid="workflows-list">
+          <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain pointer-events-auto space-y-1.5 pr-1" data-testid="workflows-list">
             {filteredWorkflows.length === 0 ? (
               <div className="p-4 text-xs text-slate-500 text-center font-mono">
                 No workflows match filter.

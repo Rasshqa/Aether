@@ -1153,15 +1153,223 @@ async fn process_request(ctx: &DaemonContext, req: IpcRequest) -> IpcResponse {
             messages.push(aetherd::ai_pilot::ChatMessage::user(prompt));
             match client.chat_completion(&provider, &settings, &messages, &[]).await {
                 Ok(resp) => {
-                    let text = resp.content.unwrap_or_default();
+                    let mut text = resp.content.unwrap_or_default();
+                    if !resp.tool_calls.is_empty() {
+                        for tc in resp.tool_calls {
+                            if !text.is_empty() {
+                                text.push_str("\n\n");
+                            }
+                            text.push_str(&format!("```tool_call\n{{\"name\": \"{}\", \"arguments\": {}}}\n```", tc.function.name, tc.function.arguments));
+                        }
+                    }
                     IpcResponse::ok(req_id, IpcResponsePayload::AiChatResult { content: text })
                 }
                 Err(err) => IpcResponse::err(req_id, "AI_CHAT_ERROR", err),
             }
         }
 
+        IpcRequestPayload::FsListDirectory {
+            root_path,
+            recursive,
+            max_depth,
+        } => {
+            let base = if root_path.trim().is_empty() || root_path == "." {
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            } else {
+                PathBuf::from(&root_path)
+            };
+
+            if !base.exists() {
+                return IpcResponse::err(req_id, "PATH_NOT_FOUND", format!("Root path '{}' does not exist", root_path));
+            }
+
+            let depth_limit = if recursive { max_depth.clamp(1, 15) } else { 1 };
+            let mut entries = Vec::new();
+            scan_directory_recursive(&base, &base, recursive, depth_limit, 1, &mut entries);
+            entries.sort_by(|a, b| {
+                if a.is_dir == b.is_dir {
+                    a.name.cmp(&b.name)
+                } else if a.is_dir {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                }
+            });
+
+            IpcResponse::ok(req_id, IpcResponsePayload::FsDirectoryListing { entries })
+        }
+
+        IpcRequestPayload::FsReadFile {
+            file_path,
+            start_line,
+            end_line,
+        } => {
+            let path = PathBuf::from(&file_path);
+            if !path.exists() {
+                return IpcResponse::err(req_id, "FILE_NOT_FOUND", format!("File '{}' not found", file_path));
+            }
+            if path.is_dir() {
+                return IpcResponse::err(req_id, "IS_DIRECTORY", format!("Path '{}' is a directory", file_path));
+            }
+
+            match std::fs::read_to_string(&path) {
+                Ok(raw) => {
+                    let lines: Vec<&str> = raw.lines().collect();
+                    let total_lines = lines.len();
+                    let start = start_line.unwrap_or(1).clamp(1, total_lines.max(1));
+                    let end = end_line.unwrap_or(total_lines).clamp(start, total_lines.max(start));
+
+                    let mut formatted = Vec::new();
+                    for idx in start..=end {
+                        let line_idx = idx.saturating_sub(1);
+                        let line_text = lines.get(line_idx).copied().unwrap_or("");
+                        formatted.push(format!("{:4} | {}", idx, line_text));
+                    }
+
+                    IpcResponse::ok(
+                        req_id,
+                        IpcResponsePayload::FsFileContent {
+                            file_path,
+                            content: formatted.join("\n"),
+                            start_line: start,
+                            end_line: end,
+                            total_lines,
+                        },
+                    )
+                }
+                Err(e) => IpcResponse::err(req_id, "READ_ERROR", e.to_string()),
+            }
+        }
+
+        IpcRequestPayload::FsWriteOrEditFile {
+            file_path,
+            operation,
+            content,
+        } => {
+            let path = PathBuf::from(&file_path);
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
+
+            let tmp_path = if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = std::fs::create_dir_all(parent);
+                    parent.join(format!(".tmp_{}", uuid::Uuid::new_v4().simple()))
+                } else {
+                    PathBuf::from(format!(".tmp_{}", uuid::Uuid::new_v4().simple()))
+                }
+            } else {
+                PathBuf::from(format!(".tmp_{}", uuid::Uuid::new_v4().simple()))
+            };
+
+            let write_result = match std::fs::write(&tmp_path, &content) {
+                Ok(_) => {
+                    let res = std::fs::rename(&tmp_path, &path);
+                    if res.is_err() {
+                        let _ = std::fs::remove_file(&tmp_path);
+                    }
+                    res
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    Err(e)
+                }
+            };
+
+            match write_result {
+                Ok(_) => {
+                    let bytes_written = content.len();
+                    let _ = ctx.event_tx.send(IpcEvent::WorkspaceFileChanged {
+                        file_path: file_path.clone(),
+                        operation: operation.clone(),
+                    });
+                    IpcResponse::ok(
+                        req_id,
+                        IpcResponsePayload::FsFileModified {
+                            file_path,
+                            bytes_written,
+                        },
+                    )
+                }
+                Err(e) => IpcResponse::err(req_id, "WRITE_ERROR", e.to_string()),
+            }
+        }
+
+        IpcRequestPayload::FsDeletePath { file_path } => {
+            let path = PathBuf::from(&file_path);
+            if !path.exists() {
+                return IpcResponse::err(req_id, "PATH_NOT_FOUND", format!("Path '{}' not found", file_path));
+            }
+
+            let res = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+
+            match res {
+                Ok(_) => {
+                    let _ = ctx.event_tx.send(IpcEvent::WorkspaceFileChanged {
+                        file_path: file_path.clone(),
+                        operation: "delete".to_string(),
+                    });
+                    IpcResponse::ok(req_id, IpcResponsePayload::FsPathDeleted { file_path })
+                }
+                Err(e) => IpcResponse::err(req_id, "DELETE_ERROR", e.to_string()),
+            }
+        }
+
         IpcRequestPayload::SubscribeEvents { .. } => {
             IpcResponse::ok(req_id, IpcResponsePayload::Success)
+        }
+    }
+}
+
+fn scan_directory_recursive(
+    dir: &Path,
+    base: &Path,
+    recursive: bool,
+    max_depth: usize,
+    current_depth: usize,
+    entries: &mut Vec<aether_protocol::ipc::FsEntryInfo>,
+) {
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+
+    let ignored_names = [".git", "node_modules", "target", "dist", ".aether"];
+
+    for entry in read_dir.flatten() {
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if ignored_names.contains(&file_name.as_str()) {
+            continue;
+        }
+
+        let path = entry.path();
+        let is_dir = path.is_dir();
+        let size_bytes = if is_dir {
+            0
+        } else {
+            entry.metadata().map(|m| m.len()).unwrap_or(0)
+        };
+
+        let rel_path = path
+            .strip_prefix(base)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| file_name.clone());
+
+        entries.push(aether_protocol::ipc::FsEntryInfo {
+            name: file_name,
+            path: rel_path,
+            is_dir,
+            size_bytes,
+        });
+
+        if is_dir && recursive && current_depth < max_depth {
+            scan_directory_recursive(&path, base, recursive, max_depth, current_depth + 1, entries);
         }
     }
 }

@@ -7,6 +7,7 @@ import {
   splitActivePane,
   setPaneViewMode,
   togglePaneInputBar,
+  sendPtyInput,
 } from '../stores/aetherStore';
 import {
   GitBranch,
@@ -19,6 +20,7 @@ import {
   ListTree,
   Terminal as TerminalIcon,
   TextCursorInput,
+  Square,
 } from 'lucide-react';
 
 interface Props {
@@ -85,6 +87,21 @@ export const AgentHeaderPill: React.FC<Props> = ({ pane, isActive }) => {
         )}
 
         {getStatusBadge()}
+
+        {(pane.status === 'EXECUTING' || pane.status === 'THINKING') && (
+          <button
+            onClick={() => {
+              sendPtyInput(pane.id, '\x03');
+              pane.status = 'IDLE';
+            }}
+            title="Stop Process / Agent (Ctrl+C)"
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-cortex-error/20 hover:bg-cortex-error/30 text-cortex-error border border-cortex-error/40 text-[10px] font-mono font-bold transition-colors cursor-pointer"
+            data-testid={`btn-stop-agent-pane-${pane.id}`}
+          >
+            <Square className="w-2.5 h-2.5 fill-current" />
+            <span>Stop</span>
+          </button>
+        )}
 
         {/* Git Worktree Branch badge */}
         {pane.gitBranch && (

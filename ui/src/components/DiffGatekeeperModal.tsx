@@ -24,34 +24,20 @@ export const DiffGatekeeperModal: React.FC = () => {
   const [fileFilter, setFileFilter] = useState('');
   const [copied, setCopied] = useState(false);
 
-  if (!store.diffGatekeeperOpen || !store.activeDiff) return null;
-
   const diff = store.activeDiff;
 
-  const handleMerge = () => {
-    mergeWorktreeSquash(diff.pane_id, commitMessage);
-  };
-
-  const handleCopyDiff = async () => {
-    try {
-      await navigator.clipboard.writeText(diff.diff_unified);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (e) {
-      console.error('Failed to copy diff to clipboard', e);
-    }
-  };
-
-  // Filter modified files list
+  // Filter modified files list (called unconditionally to preserve hook order)
   const filteredFiles = useMemo(() => {
+    if (!diff) return [];
     if (!fileFilter.trim()) return diff.files_changed;
     return diff.files_changed.filter((f) =>
       f.toLowerCase().includes(fileFilter.toLowerCase())
     );
-  }, [diff.files_changed, fileFilter]);
+  }, [diff, fileFilter]);
 
-  // Extract per-file diff section if a file is selected
+  // Extract per-file diff section if a file is selected (called unconditionally to preserve hook order)
   const displayedDiffLines = useMemo(() => {
+    if (!diff) return [];
     const rawLines = diff.diff_unified.split('\n');
     if (!selectedFile) return rawLines;
 
@@ -74,7 +60,23 @@ export const DiffGatekeeperModal: React.FC = () => {
     }
 
     return result.length > 0 ? result : rawLines;
-  }, [diff.diff_unified, selectedFile]);
+  }, [diff, selectedFile]);
+
+  if (!store.diffGatekeeperOpen || !diff) return null;
+
+  const handleMerge = () => {
+    mergeWorktreeSquash(diff.pane_id, commitMessage);
+  };
+
+  const handleCopyDiff = async () => {
+    try {
+      await navigator.clipboard.writeText(diff.diff_unified);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      console.error('Failed to copy diff to clipboard', e);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/75 backdrop-blur-sm animate-fadeIn">
@@ -134,10 +136,10 @@ export const DiffGatekeeperModal: React.FC = () => {
         </div>
 
         {/* Content Body */}
-        <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 min-h-0 flex overflow-hidden">
           {/* Left: Files Changed Sidebar */}
-          <div className="w-72 border-r border-tokyo-border bg-tokyo-bgDark/60 flex flex-col p-3 overflow-y-auto">
-            <div className="flex items-center justify-between text-xs font-semibold text-tokyo-comment uppercase tracking-wider mb-2">
+          <div className="w-72 border-r border-tokyo-border bg-tokyo-bgDark/60 flex flex-col p-3 min-h-0 overflow-hidden shrink-0">
+            <div className="flex items-center justify-between text-xs font-semibold text-tokyo-comment uppercase tracking-wider mb-2 shrink-0">
               <span>Modified Files ({diff.files_changed.length})</span>
               {selectedFile && (
                 <button
@@ -150,7 +152,7 @@ export const DiffGatekeeperModal: React.FC = () => {
             </div>
 
             {/* File search filter */}
-            <div className="relative mb-2">
+            <div className="relative mb-2 shrink-0">
               <Search className="w-3 h-3 text-slate-500 absolute left-2 top-2" />
               <input
                 type="text"
@@ -161,7 +163,7 @@ export const DiffGatekeeperModal: React.FC = () => {
               />
             </div>
 
-            <div className="flex flex-col gap-1 overflow-y-auto">
+            <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain pointer-events-auto flex flex-col gap-1">
               {filteredFiles.map((file, i) => {
                 const isSelected = selectedFile === file;
                 const fileName = file.split('/').pop() || file;
@@ -199,7 +201,7 @@ export const DiffGatekeeperModal: React.FC = () => {
           </div>
 
           {/* Right: Unified Diff Viewer */}
-          <div className="flex-1 bg-tokyo-bgDark p-4 overflow-auto font-mono text-xs">
+          <div className="flex-1 min-h-0 bg-tokyo-bgDark p-4 overflow-auto font-mono text-xs overscroll-contain pointer-events-auto select-text">
             {selectedFile && (
               <div className="mb-2 px-2 py-1 rounded bg-slate-800/80 border border-slate-700 text-slate-300 text-[11px] flex items-center justify-between">
                 <span>Showing diff for: <strong className="text-cyan-300">{selectedFile}</strong></span>

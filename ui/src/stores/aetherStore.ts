@@ -217,7 +217,59 @@ export const AI_COMMANDS: AiCommandDefinition[] = [
     syntax: '/export',
     description: 'Ekspor transkrip percakapan sesi ini ke format Markdown',
   },
+  {
+    command: '/app tabs',
+    syntax: '/app tabs',
+    description: 'Tampilkan semua tab dan pane terminal yang sedang aktif',
+  },
+  {
+    command: '/fs list',
+    syntax: '/fs list [path]',
+    description: 'Daftar struktur direktori dan file dalam workspace',
+  },
+  {
+    command: '/fs read',
+    syntax: '/fs read <file_path>',
+    description: 'Baca isi file dengan nomor baris',
+  },
+  {
+    command: '/pane read',
+    syntax: '/pane read [pane_id]',
+    description: 'Baca tampilan layar terminal pane saat ini',
+  },
+  {
+    command: '/pane send',
+    syntax: '/pane send <pane_id> <teks>',
+    description: 'Kirim input perintah ke terminal pane tertentu',
+  },
 ];
+
+export interface PendingAiApproval {
+  id: string;
+  tier: 1 | 2 | 3;
+  actionType: string;
+  toolName: string;
+  args: Record<string, any>;
+  payloadPreview: string;
+  riskReason: string;
+  resolve: (value: { approved: boolean; rememberSession?: boolean; rejectReason?: string }) => void;
+}
+
+export interface SecurityEvaluation {
+  tier: 1 | 2 | 3;
+  actionType: string;
+  payloadPreview: string;
+  riskReason: string;
+}
+
+export interface AppTabsAndPanesSummary {
+  tabs: TerminalTab[];
+  panes: AgentPane[];
+  activeTabId: string | null;
+  activePaneId: string | null;
+  layout: LayoutNode | null;
+  backgroundTasks: BackgroundTask[];
+}
 
 export interface ProviderMeta {
   id: string;
@@ -566,6 +618,8 @@ let globalState = {
   aiLoading: false,
   aiError: null as string | null,
   aiPendingContext: null as string | null,
+  pendingAiApproval: null as PendingAiApproval | null,
+  aiSessionApprovedTier2: false,
 };
 
 // Initialize theme on app load
@@ -1892,7 +1946,7 @@ export function subscribeAetherEvents(onPtyData?: (paneId: string, bytes: Uint8A
           }, 600);
         }
       });
-    } else if (payload.ObsidianNoteUpdated) {
+    } else if (payload.ObsidianNoteUpdated || payload.WorkspaceFileChanged) {
       globalState.obsidianRefreshTick += 1;
       notify();
     } else if (payload.PaneStatusChanged) {
@@ -2289,7 +2343,7 @@ export function dispatchToPeerAgent(command: string, output: string, targetCli?:
 }
 
 /**
- * Seamlessly routes a natural language prompt to an active or newly spawned
+ * Routes a natural language prompt to an active or newly spawned
  * AI agent pane without requiring manual '#' prefixing or causing shell syntax errors.
  *
  * @param instruction Natural language prompt (any leading '#' is stripped)
@@ -3295,6 +3349,967 @@ export function clearAiMessages(): void {
   clearCurrentAiSession();
 }
 
+let activeAiAbortController: AbortController | null = null;
+
+export function stopAiAssistant(): void {
+  if (activeAiAbortController) {
+    try {
+      activeAiAbortController.abort();
+    } catch {}
+    activeAiAbortController = null;
+  }
+
+  globalState.aiLoading = false;
+  globalState.aiPilotRunning = false;
+
+  if (globalState.pendingAiApproval) {
+    resolvePendingAiApproval(false, false, 'Action stopped by user');
+  }
+
+  const activePane = globalState.panes.find((p) => p.id === globalState.activePaneId);
+  if (activePane && (activePane.status === 'EXECUTING' || activePane.status === 'THINKING')) {
+    pane_send_keystroke(activePane.id, 'Ctrl+C');
+    activePane.status = 'IDLE';
+  }
+
+  const session = getActiveAiSession();
+  const lastMsg = session.messages[session.messages.length - 1];
+  if (lastMsg && lastMsg.role === 'assistant') {
+    if (!lastMsg.content.includes('(Stopped by user)')) {
+      lastMsg.content += '\n\n*(Agent stopped by user)*';
+    }
+  } else {
+    const stopMsg: AiMessage = {
+      id: `msg_stop_${Date.now()}`,
+      role: 'system',
+      content: 'Agent execution stopped by user.',
+      timestamp: Date.now(),
+    };
+    session.messages.push(stopMsg);
+    globalState.aiMessages.push(stopMsg);
+  }
+
+  persistAiSessions();
+  notify();
+}
+
+export function getOmniAssistantSystemPrompt(customInstructions?: string): string {
+  const activePaneId = globalState.activePaneId || globalState.panes[0]?.id || 'terminal-1';
+  const activePane = globalState.panes.find((p) => p.id === activePaneId);
+  const cwd = activePane?.worktreePath || (typeof globalThis !== 'undefined' && (globalThis as any).process?.cwd ? (globalThis as any).process.cwd() : '/workspace');
+  const cli = activePane?.cliType || globalState.defaultShell || 'shell';
+  const tabCount = globalState.tabs.length;
+  const paneCount = globalState.panes.length;
+
+  return `You are AetherCortex, an autonomous AI assistant and omni-access controller embedded directly within the AetherTerminal desktop application.
+You have direct programmatic inspection and control over all terminal tabs, split panes, background tasks, running processes, workspace files, and application features.
+
+LIVE APPLICATION STATE:
+- Active Tab: "${globalState.activeTabId || 'tab-1'}" (${tabCount} open tab(s))
+- Active Terminal Pane: "${activePaneId}" (CLI: "${cli}", Status: "${activePane?.status || 'IDLE'}", Working Dir: "${cwd}")
+- Total Panes: ${paneCount} open pane(s)
+
+AVAILABLE APPLICATION & TERMINAL CONTROLLER TOOLS:
+You can invoke tools whenever needed to fulfill the user's request. To execute one or more tools, emit a code block with the "tool_call" identifier and valid JSON:
+\`\`\`tool_call
+{
+  "name": "<tool_name>",
+  "arguments": { <parameters> }
+}
+\`\`\`
+
+Tool Catalog:
+1. "app_list_tabs_and_panes": {}
+   Returns full hierarchy of all open tabs, paneIds, active layout trees, running cliType, pid, status, worktreePath, gitBranch, openPorts, and background tasks.
+
+2. "app_operate_tab": { "action": "create" | "switch" | "close" | "rename" | "reorder", "tab_id"?: string, "title"?: string, "cli_type"?: string }
+   Controls workspace tabs: create, switch, rename, reorder, or close tabs programmatically.
+
+3. "app_operate_pane": { "action": "spawn" | "split_vertical" | "split_horizontal" | "focus" | "close" | "send_to_bg" | "attach_from_bg" | "equalize" | "resize", "pane_id"?: string, "cli_type"?: string, "ratio"?: number }
+   Controls split panes: spawn new pane, split vertically/horizontally, focus, close, send to background, attach from background, or equalize layout.
+
+4. "pane_read_screen": { "pane_id": string, "line_count"?: number }
+   Fetches the latest scrollback buffer from aetherd and strips ANSI escape codes so you can read clean terminal output.
+
+5. "pane_send_input": { "pane_id": string, "text": string, "submit_enter"?: boolean }
+   Types commands or prompts into any active or background pane (with automatic 60ms delay before Enter for interactive TUIs).
+
+6. "pane_send_keystroke": { "pane_id": string, "key": "Enter" | "Escape" | "Ctrl+C" | "Tab" | "Up" | "Down" | "y" | "n" }
+   Sends raw control sequences to navigate menus or answer prompts inside agent TUIs.
+
+7. "fs_list_directory": { "root_path"?: string, "recursive"?: boolean, "max_depth"?: number }
+   Returns a clean file tree structure (automatically ignoring .git, node_modules, target, dist).
+
+8. "fs_read_file": { "file_path": string, "start_line"?: number, "end_line"?: number }
+   Reads file content line-by-line with line numbers.
+
+9. "fs_write_or_edit_file": { "file_path": string, "operation": "write" | "replace_lines" | "apply_patch", "content": string }
+   Creates or edits files atomically (automatically captures a zero-commit snapshot before modifying).
+
+10. "fs_delete_path": { "file_path": string }
+    Deletes a file or directory (must always trigger Security Gatekeeper approval).
+
+11. "app_trigger_feature": { "feature": "diff_gatekeeper" | "squash_merge" | "create_snapshot" | "rollback_snapshot" | "publish_blackboard" | "toggle_obsidian_task", "params"?: object }
+    Opens diffs, executes squash merges, captures/rolls back Git tree snapshots, posts to Shared Blackboard, or toggles Obsidian tasks.
+
+RULES:
+- When the user asks you to inspect, explore, create, edit, run, or operate anything in the workspace or terminal, DO NOT say you cannot access it. Immediately invoke the appropriate tool!
+- You can explain what you are doing in concise text alongside or before your tool_call.
+- Never write generic preamble or apologies. Be direct, authoritative, and actionable.
+${customInstructions ? `\nUSER CUSTOM INSTRUCTIONS:\n${customInstructions}` : ''}`;
+}
+
+export function resolvePendingAiApproval(
+  approved: boolean,
+  rememberSession: boolean = false,
+  rejectReason?: string
+): void {
+  if (!globalState.pendingAiApproval) return;
+  const current = globalState.pendingAiApproval;
+  if (approved && rememberSession && current.tier === 2) {
+    globalState.aiSessionApprovedTier2 = true;
+  }
+  globalState.pendingAiApproval = null;
+  notify();
+  current.resolve({ approved, rememberSession, rejectReason });
+}
+
+export const DESTRUCTIVE_CMD_REGEX =
+  /\b(rm\s|rmdir\b|sudo\b|chmod\b|chown\b|dd\b|mkfs\b|kill\s+-9\b|pkill\b|git\s+reset\s+--hard|git\s+push\s+.*--force|git\s+clean|\bcurl\b.*\|\s*(ba)?sh|\bwget\b|:\(\)\{:\|:&\};:|>(\s*\/dev\/sd|.*\/dev\/nvme))/i;
+
+export function isSensitiveOrExternalPath(targetPath?: string): { isSensitive: boolean; reason?: string } {
+  if (!targetPath) return { isSensitive: false };
+  const normalized = targetPath.trim().replace(/\\/g, '/');
+
+  const sensitivePatterns = [
+    /(^|\/|\~)[\.]?ssh(\/|$)/i,
+    /(^|\/|\~)[\.]?aws(\/|$)/i,
+    /(^|\/|\~)[\.]?gnupg(\/|$)/i,
+    /^\/etc(\/|$)/i,
+    /(^|\/)\.env(\.|$)/i,
+    /(^|\/)(id_rsa|id_ed25519|id_ecdsa|id_dsa)(\.|$)/i,
+    /(^|\/)(credentials|secrets|private_key)(\.|$)/i,
+    /\.(pem|key)$/i,
+  ];
+
+  for (const pat of sensitivePatterns) {
+    if (pat.test(normalized)) {
+      return {
+        isSensitive: true,
+        reason: `Target path touches sensitive directory or credential file (${normalized})`,
+      };
+    }
+  }
+
+  // Path traversal outside workspace root
+  if (normalized.startsWith('../') || normalized.includes('/../') || normalized === '..') {
+    return {
+      isSensitive: true,
+      reason: `Path traversal targets directory outside workspace (${normalized})`,
+    };
+  }
+
+  return { isSensitive: false };
+}
+
+export function evaluateActionSecurity(toolName: string, args: Record<string, any>): SecurityEvaluation {
+  // Check sensitive / external path targets across any filesystem tool
+  const rawPath = args.path || args.filePath || args.rootPath || args.file_path || args.root_path;
+  const pathCheck = isSensitiveOrExternalPath(rawPath);
+  if (pathCheck.isSensitive) {
+    return {
+      tier: 3,
+      actionType: `Access Sensitive/External Path (${toolName})`,
+      payloadPreview: `Path: ${rawPath}\nTool: ${toolName}`,
+      riskReason: pathCheck.reason || 'Accesses sensitive files or path outside active workspace.',
+    };
+  }
+
+  // Tier 3: Deleting files or folders
+  if (toolName === 'fs_delete_path') {
+    return {
+      tier: 3,
+      actionType: 'Delete Filesystem Path',
+      payloadPreview: `Delete: ${args.path || args.file_path || '(unknown path)'}`,
+      riskReason: 'Permanently deletes files or directories from the workspace.',
+    };
+  }
+
+  // Tier 3: Merging worktrees (squash_merge) or rolling back snapshot (rollback_snapshot)
+  if (toolName === 'app_trigger_feature') {
+    const feat = args.featureName || args.feature;
+    if (feat === 'squash_merge') {
+      return {
+        tier: 3,
+        actionType: 'Git Squash Merge',
+        payloadPreview: `Squash merge: ${JSON.stringify(args, null, 2)}`,
+        riskReason: 'Performs Git branch squash merge which rewrites history and commits changes.',
+      };
+    }
+    if (feat === 'rollback_snapshot') {
+      return {
+        tier: 3,
+        actionType: 'Git Snapshot Rollback',
+        payloadPreview: `Rollback to snapshot: ${args.snapshotId || args.id || '(unknown)'}`,
+        riskReason: 'Discards uncommitted working directory changes and restores previous snapshot.',
+      };
+    }
+    if (feat === 'create_snapshot' || feat === 'diff_gatekeeper') {
+      return {
+        tier: 1,
+        actionType: `Trigger Feature: ${feat}`,
+        payloadPreview: JSON.stringify(args, null, 2),
+        riskReason: 'Safe zero-commit snapshot or read-only diff inspection. Auto-approved.',
+      };
+    }
+    if (feat === 'publish_blackboard' || feat === 'toggle_obsidian_task') {
+      return {
+        tier: 2,
+        actionType: `Trigger Feature: ${feat}`,
+        payloadPreview: JSON.stringify(args, null, 2),
+        riskReason: 'Updates workspace state or publishes blackboard announcement.',
+      };
+    }
+  }
+
+  // Tier 3: Interrupt Process Keystrokes
+  if (toolName === 'pane_send_keystroke') {
+    const k = String(args.key || args.keystroke || '').toLowerCase().replace(/[\s-_]/g, '');
+    if (k.includes('ctrl+c') || k.includes('ctrlc') || k.includes('sigint') || k.includes('ctrl+d') || k.includes('ctrl+z')) {
+      return {
+        tier: 3,
+        actionType: 'Interrupt Process (Keystroke)',
+        payloadPreview: `Send keystroke: ${args.key || args.keystroke} to pane ${args.paneId || args.pane_id || 'active'}`,
+        riskReason: 'Sends interrupt signal (SIGINT/EOF) which terminates running background process.',
+      };
+    }
+    return {
+      tier: 2,
+      actionType: 'Send Terminal Keystroke',
+      payloadPreview: `Send keystroke: ${args.key || args.keystroke} to pane ${args.paneId || args.pane_id || 'active'}`,
+      riskReason: 'Sends navigational or interactive response keystroke to pane.',
+    };
+  }
+
+  // Tier 3: Destructive shell command or sensitive file references in shell input
+  if (toolName === 'pane_send_input' || toolName === 'sendPtyInput') {
+    const text = String(args.text || args.data || '');
+    const cmdPathCheck = isSensitiveOrExternalPath(text);
+    if (DESTRUCTIVE_CMD_REGEX.test(text) || cmdPathCheck.isSensitive) {
+      return {
+        tier: 3,
+        actionType: 'Execute High-Risk Shell Command',
+        payloadPreview: text,
+        riskReason: cmdPathCheck.isSensitive
+          ? (cmdPathCheck.reason || 'Command references sensitive directory or credentials file.')
+          : "Command contains potentially destructive shell patterns ('rm ', 'rmdir', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'kill -9', 'pkill', 'git reset --hard', 'git push --force', 'git clean', or 'curl | sh').",
+      };
+    }
+    return {
+      tier: 2,
+      actionType: 'Execute Terminal Input',
+      payloadPreview: text,
+      riskReason: 'Sends shell command to terminal PTY session.',
+    };
+  }
+
+  // Terminating an active pane with running foreground process is Tier 3
+  if (toolName === 'app_operate_pane' && args.action === 'close') {
+    const targetId = args.paneId || args.pane_id || globalState.activePaneId;
+    const targetPane = globalState.panes.find((p) => p.id === targetId);
+    if (targetPane && (targetPane.status === 'EXECUTING' || targetPane.status === 'THINKING' || (targetPane.pid && targetPane.pid > 0))) {
+      return {
+        tier: 3,
+        actionType: 'Terminate Active Process in Pane',
+        payloadPreview: `Close pane: ${targetId} (CLI: ${targetPane.cliType}, PID: ${targetPane.pid || 'running'}, status: ${targetPane.status})`,
+        riskReason: 'Terminating an active pane that has a running foreground process interrupts execution and can lose unsaved state.',
+      };
+    }
+    return {
+      tier: 2,
+      actionType: 'Close Terminal Pane',
+      payloadPreview: `Close pane: ${targetId || 'active'}`,
+      riskReason: 'Closes an idle terminal pane.',
+    };
+  }
+
+  if (toolName === 'app_operate_pane') {
+    if (args.action === 'spawn' || args.action === 'split' || args.action === 'split_vertical' || args.action === 'split_horizontal') {
+      return {
+        tier: 2,
+        actionType: 'Spawn/Split Terminal Pane',
+        payloadPreview: `Action: ${args.action}, Target: ${args.paneId || args.pane_id || 'active'}`,
+        riskReason: 'Spawns or splits a new terminal pane process in the workspace.',
+      };
+    }
+    if (args.action === 'focus' || args.action === 'equalize' || args.action === 'send_to_bg' || args.action === 'attach_from_bg') {
+      return {
+        tier: 1,
+        actionType: `Pane Action: ${args.action}`,
+        payloadPreview: JSON.stringify(args, null, 2),
+        riskReason: 'Safe pane navigation or layout adjustment. Auto-approved.',
+      };
+    }
+  }
+
+  if (toolName === 'app_operate_tab') {
+    if (args.action === 'close') {
+      return {
+        tier: 2,
+        actionType: 'Close Terminal Tab',
+        payloadPreview: `Close tab: ${args.tabId || args.tab_id || 'active'}`,
+        riskReason: 'Closes a terminal tab and its contained terminal panes.',
+      };
+    }
+    if (args.action === 'create') {
+      return {
+        tier: 2,
+        actionType: 'Create Terminal Tab',
+        payloadPreview: `Create tab: ${args.title || 'New Tab'} (CLI: ${args.cliType || args.cli_type || 'default'})`,
+        riskReason: 'Creates a new terminal tab in the workspace.',
+      };
+    }
+    return {
+      tier: 1,
+      actionType: `Tab Action: ${args.action}`,
+      payloadPreview: JSON.stringify(args, null, 2),
+      riskReason: 'Safe tab navigation or reordering. Auto-approved.',
+    };
+  }
+
+  // Tier 2: Medium Risk / Workspace Mutation inside workspace
+  if (toolName === 'fs_write_or_edit_file') {
+    const path = args.path || args.filePath || args.file_path || '(unknown file)';
+    const mode = args.operation || args.editMode || 'write';
+    const content = String(args.content || '');
+    const preview = `File: ${path} (${mode})\n---\n${content.slice(0, 500)}${content.length > 500 ? '\n... (truncated)' : ''}`;
+    return {
+      tier: 2,
+      actionType: `Modify Workspace File: ${path}`,
+      payloadPreview: preview,
+      riskReason: 'Modifies source code on disk. A zero-commit snapshot is automatically captured before modification.',
+    };
+  }
+
+  if (toolName === 'claim_module' || toolName === 'release_module') {
+    return {
+      tier: 2,
+      actionType: `${toolName === 'claim_module' ? 'Claim' : 'Release'} File Lock`,
+      payloadPreview: JSON.stringify(args, null, 2),
+      riskReason: 'Claims or releases collaborative file locks on workspace modules.',
+    };
+  }
+
+  // Tier 1: Safe / Read-Only / Non-destructive operations
+  return {
+    tier: 1,
+    actionType: `Read-Only: ${toolName}`,
+    payloadPreview: JSON.stringify(args, null, 2),
+    riskReason: 'Safe inspection or non-destructive operation. Auto-approved.',
+  };
+}
+
+export async function checkAndApproveAction(
+  toolName: string,
+  args: Record<string, any>
+): Promise<{ approved: boolean; rejectReason?: string }> {
+  const evaluation = evaluateActionSecurity(toolName, args);
+  if (evaluation.tier === 1) {
+    return { approved: true };
+  }
+  if (evaluation.tier === 2 && globalState.aiSessionApprovedTier2) {
+    return { approved: true };
+  }
+  return new Promise<{ approved: boolean; rejectReason?: string }>((resolve) => {
+    globalState.pendingAiApproval = {
+      id: `approval_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      tier: evaluation.tier,
+      actionType: evaluation.actionType,
+      toolName,
+      args,
+      payloadPreview: evaluation.payloadPreview,
+      riskReason: evaluation.riskReason,
+      resolve: (res) => {
+        resolve({ approved: res.approved, rejectReason: res.rejectReason });
+      },
+    };
+    notify();
+  });
+}
+
+export function stripAnsiCodes(text: string): string {
+  return text.replace(
+    /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g,
+    ''
+  );
+}
+
+export function app_list_tabs_and_panes(): AppTabsAndPanesSummary {
+  return {
+    tabs: [...globalState.tabs],
+    panes: [...globalState.panes],
+    activeTabId: globalState.activeTabId,
+    activePaneId: globalState.activePaneId,
+    layout: globalState.layout,
+    backgroundTasks: [...globalState.backgroundTasks],
+  };
+}
+
+export async function app_operate_tab(
+  action: 'create' | 'switch' | 'close' | 'rename' | 'reorder',
+  tabId?: string,
+  titleOrExtra?: string | Record<string, any>,
+  cliType?: string
+): Promise<{ success: boolean; message: string; tabId?: string }> {
+  const extra: Record<string, any> =
+    typeof titleOrExtra === 'object' && titleOrExtra !== null
+      ? titleOrExtra
+      : {
+          title: typeof titleOrExtra === 'string' ? titleOrExtra : undefined,
+          cliType: cliType,
+        };
+
+  switch (action) {
+    case 'create': {
+      const title = extra.title || `Tab ${globalState.tabs.length + 1}`;
+      const cli = extra.cliType || cliType || globalState.defaultShell || 'shell';
+      const newTab = await createTab(title, cli);
+      if (!newTab) {
+        return { success: false, message: 'Failed to create new tab' };
+      }
+      return { success: true, message: `Created tab ${newTab.title}`, tabId: newTab.id };
+    }
+    case 'switch': {
+      if (!tabId) return { success: false, message: 'Missing tabId for switch action' };
+      switchTab(tabId);
+      return { success: true, message: `Switched to tab ${tabId}`, tabId };
+    }
+    case 'close': {
+      const targetId = tabId || globalState.activeTabId;
+      if (!targetId) return { success: false, message: 'No tab specified to close' };
+      await closeTab(targetId);
+      return { success: true, message: `Closed tab ${targetId}`, tabId: targetId };
+    }
+    case 'rename': {
+      const newTitle = extra.title || (typeof titleOrExtra === 'string' ? titleOrExtra : undefined);
+      if (!tabId || !newTitle) return { success: false, message: 'Missing tabId or new title' };
+      renameTab(tabId, newTitle);
+      return { success: true, message: `Renamed tab ${tabId} to ${newTitle}`, tabId };
+    }
+    case 'reorder': {
+      if (!tabId || typeof extra.newIndex !== 'number') {
+        return { success: false, message: 'Missing tabId or newIndex' };
+      }
+      const currentIndex = globalState.tabs.findIndex((t) => t.id === tabId);
+      if (currentIndex === -1) return { success: false, message: 'Tab not found' };
+      const [moved] = globalState.tabs.splice(currentIndex, 1);
+      const targetIndex = Math.max(0, Math.min(extra.newIndex, globalState.tabs.length));
+      globalState.tabs.splice(targetIndex, 0, moved);
+      notify();
+      return { success: true, message: `Reordered tab ${tabId} to index ${targetIndex}`, tabId };
+    }
+    default:
+      return { success: false, message: `Unknown tab action: ${action}` };
+  }
+}
+
+export async function app_operate_pane(
+  action:
+    | 'spawn'
+    | 'split_vertical'
+    | 'split_horizontal'
+    | 'focus'
+    | 'close'
+    | 'send_to_bg'
+    | 'attach_from_bg'
+    | 'equalize'
+    | 'split'
+    | 'resize',
+  paneId?: string,
+  cliTypeOrExtra?: string | Record<string, any>
+): Promise<{ success: boolean; message: string; paneId?: string }> {
+  const extra: Record<string, any> =
+    typeof cliTypeOrExtra === 'object' && cliTypeOrExtra !== null
+      ? cliTypeOrExtra
+      : {
+          cliType: typeof cliTypeOrExtra === 'string' ? cliTypeOrExtra : undefined,
+        };
+  const targetId = paneId || globalState.activePaneId || globalState.panes[0]?.id || 'terminal-1';
+
+  switch (action) {
+    case 'spawn': {
+      const cli = extra.cliType || extra.cli_type || 'shell';
+      const newPane = await spawnAgentPane(cli, true);
+      return { success: !!newPane, message: `Spawned new pane ${newPane?.id}`, paneId: newPane?.id };
+    }
+    case 'split_vertical': {
+      const cli = extra.cliType || extra.cli_type || 'shell';
+      setActivePane(targetId);
+      const newPane = await splitActivePane('vertical', cli);
+      return { success: true, message: `Split pane ${targetId} vertically`, paneId: newPane?.id };
+    }
+    case 'split_horizontal': {
+      const cli = extra.cliType || extra.cli_type || 'shell';
+      setActivePane(targetId);
+      const newPane = await splitActivePane('horizontal', cli);
+      return { success: true, message: `Split pane ${targetId} horizontally`, paneId: newPane?.id };
+    }
+    case 'split': {
+      const dir = (extra.direction === 'horizontal' ? 'horizontal' : 'vertical') as 'vertical' | 'horizontal';
+      const cli = extra.cliType || extra.cli_type || 'shell';
+      setActivePane(targetId);
+      const newPane = await splitActivePane(dir, cli);
+      return { success: true, message: `Split pane ${targetId} (${dir})`, paneId: newPane?.id };
+    }
+    case 'focus': {
+      setActivePane(targetId);
+      return { success: true, message: `Focused pane ${targetId}`, paneId: targetId };
+    }
+    case 'close': {
+      await closePane(targetId);
+      return { success: true, message: `Closed pane ${targetId}`, paneId: targetId };
+    }
+    case 'send_to_bg': {
+      sendPaneToBackground(targetId);
+      return { success: true, message: `Sent pane ${targetId} to background tasks`, paneId: targetId };
+    }
+    case 'attach_from_bg': {
+      const asNewTab = !!(extra.asNewTab || extra.as_new_tab);
+      await bringBackgroundToForeground(targetId, asNewTab);
+      return { success: true, message: `Attached background task ${targetId} to foreground`, paneId: targetId };
+    }
+    case 'equalize': {
+      equalizeLayout();
+      return { success: true, message: 'Layout panes equalized', paneId: targetId };
+    }
+    case 'resize': {
+      if (typeof extra.ratio === 'number') {
+        const adjustRatio = (node: LayoutNode | null): boolean => {
+          if (!node) return false;
+          if (node.type === 'split') {
+            const hasTarget = (n: LayoutNode): boolean => {
+              if (n.type === 'pane') return n.paneId === targetId;
+              return hasTarget(n.children[0]) || hasTarget(n.children[1]);
+            };
+            if (hasTarget(node.children[0]) || hasTarget(node.children[1])) {
+              node.splitRatio = Math.max(0.1, Math.min(0.9, extra.ratio));
+              return true;
+            }
+            return adjustRatio(node.children[0]) || adjustRatio(node.children[1]);
+          }
+          return false;
+        };
+        adjustRatio(globalState.layout);
+        notify();
+      }
+      return { success: true, message: `Resized pane ${targetId}`, paneId: targetId };
+    }
+    default:
+      return { success: false, message: `Unknown pane action: ${action}` };
+  }
+}
+
+export async function pane_read_screen(
+  paneId?: string,
+  maxLines: number = 100
+): Promise<{ paneId: string; lines: string[]; text: string }> {
+  const targetId = paneId || globalState.activePaneId || globalState.panes[0]?.id || 'terminal-1';
+  let rawText = '';
+
+  try {
+    const scrollback = await getPaneScrollback(targetId);
+    if (scrollback && scrollback.data && scrollback.data.length > 0) {
+      rawText = new TextDecoder('utf-8', { fatal: false }).decode(scrollback.data);
+    }
+  } catch (err) {
+    console.warn('Scrollback read error:', err);
+  }
+
+  if (!rawText.trim()) {
+    const blocks = getPaneBlocks(targetId);
+    if (blocks.length > 0) {
+      rawText = blocks
+        .map((b) => `$ ${b.command}\n${b.outputText || ''}`)
+        .join('\n');
+    }
+  }
+
+  if (!rawText.trim()) {
+    const pane = globalState.panes.find((p) => p.id === targetId);
+    rawText = `[Pane ${targetId}] CLI: ${pane?.cliType || 'sh'}, Status: ${pane?.status || 'IDLE'}, CWD: ${pane?.worktreePath || '.'}`;
+  }
+
+  const clean = stripAnsiCodes(rawText);
+  const allLines = clean.split(/\r?\n/);
+  const lines = allLines.slice(-Math.max(1, maxLines));
+
+  return {
+    paneId: targetId,
+    lines,
+    text: lines.join('\n'),
+  };
+}
+
+export async function pane_send_input(
+  paneId?: string,
+  text: string = '',
+  appendNewline: boolean = true
+): Promise<{ success: boolean; paneId: string }> {
+  const targetId = paneId || globalState.activePaneId || globalState.panes[0]?.id || 'terminal-1';
+  if (!text) {
+    return { success: true, paneId: targetId };
+  }
+
+  if (appendNewline) {
+    await sendPtyInput(targetId, text);
+    // 60ms delay before sending Enter to ensure interactive CLI sub-agents do not drop prompt
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await sendPtyInput(targetId, '\r');
+  } else {
+    await sendPtyInput(targetId, text);
+  }
+
+  return { success: true, paneId: targetId };
+}
+
+export async function pane_send_keystroke(
+  paneId?: string,
+  keystrokeOrKey: string = ''
+): Promise<{ success: boolean; paneId: string }> {
+  const targetId = paneId || globalState.activePaneId || globalState.panes[0]?.id || 'terminal-1';
+  let seq = keystrokeOrKey;
+  const lower = keystrokeOrKey.toLowerCase().replace(/[\s-_]/g, '');
+
+  if (lower === 'ctrl+c' || lower === 'ctrlc' || lower === 'sigint') {
+    seq = '\x03';
+  } else if (lower === 'ctrl+d' || lower === 'ctrld' || lower === 'eof') {
+    seq = '\x04';
+  } else if (lower === 'ctrl+z' || lower === 'ctrlz' || lower === 'sigtstp') {
+    seq = '\x1a';
+  } else if (lower === 'enter' || lower === 'return') {
+    seq = '\r';
+  } else if (lower === 'escape' || lower === 'esc') {
+    seq = '\x1b';
+  } else if (lower === 'tab') {
+    seq = '\t';
+  } else if (lower === 'backspace') {
+    seq = '\x7f';
+  } else if (lower === 'up' || lower === 'arrowup') {
+    seq = '\x1b[A';
+  } else if (lower === 'down' || lower === 'arrowdown') {
+    seq = '\x1b[B';
+  } else if (lower === 'right' || lower === 'arrowright') {
+    seq = '\x1b[C';
+  } else if (lower === 'left' || lower === 'arrowleft') {
+    seq = '\x1b[D';
+  } else if (lower === 'y') {
+    seq = 'y';
+  } else if (lower === 'n') {
+    seq = 'n';
+  }
+
+  await sendPtyInput(targetId, seq);
+  return { success: true, paneId: targetId };
+}
+
+export async function app_trigger_feature(
+  featureName: string,
+  payload?: Record<string, any>
+): Promise<{ success: boolean; message: string }> {
+  switch (featureName) {
+    case 'diff_gatekeeper':
+      globalState.diffGatekeeperOpen = true;
+      notify();
+      return { success: true, message: 'Diff gatekeeper modal opened' };
+    case 'squash_merge':
+      if (isRunningInTauri() && invoke) {
+        await invoke('cmd_git_squash_merge', payload || {});
+      }
+      return { success: true, message: 'Squash merge triggered' };
+    case 'create_snapshot': {
+      const summary = payload?.summary || payload?.label || 'Manual Snapshot';
+      const snapId = await createSnapshot(summary);
+      return { success: !!snapId, message: snapId ? `Snapshot created: ${snapId}` : 'Snapshot creation failed' };
+    }
+    case 'rollback_snapshot': {
+      const snapId = payload?.snapshotId || payload?.id;
+      if (!snapId) return { success: false, message: 'Missing snapshot ID for rollback' };
+      const ok = await rollbackSnapshot(snapId);
+      return { success: ok, message: ok ? `Rolled back to snapshot: ${snapId}` : 'Rollback failed' };
+    }
+    case 'publish_blackboard': {
+      const id = await publishBlackboardEntry(
+        payload?.authorAgentId || 'AI Assistant',
+        payload?.entryType || 'ANNOUNCEMENT',
+        payload?.title || 'Blackboard Broadcast',
+        payload?.contentMarkdown || '',
+        payload?.targetAgentId
+      );
+      return { success: true, message: `Published to blackboard with ID: ${id}` };
+    }
+    case 'toggle_obsidian_task': {
+      await updateObsidianTask(
+        payload?.notePath || '',
+        payload?.taskText || '',
+        payload?.completed ?? true
+      );
+      globalState.obsidianRefreshTick += 1;
+      notify();
+      return { success: true, message: 'Obsidian task state toggled' };
+    }
+    default:
+      return { success: false, message: `Unknown feature name: ${featureName}` };
+  }
+}
+
+export async function fs_list_directory(path: string = '.', maxDepth: number = 3): Promise<any> {
+  if (isRunningInTauri() && invoke) {
+    try {
+      return await invoke('cmd_fs_list_directory', { rootPath: path, root_path: path, maxDepth, max_depth: maxDepth });
+    } catch (err: any) {
+      throw new Error(err?.message || String(err) || 'Failed to list directory');
+    }
+  }
+  return {
+    path,
+    entries: [
+      { name: 'src', path: `${path}/src`, is_dir: true, size: 4096, modified_at: Date.now() },
+      { name: 'Cargo.toml', path: `${path}/Cargo.toml`, is_dir: false, size: 1024, modified_at: Date.now() },
+      { name: 'package.json', path: `${path}/package.json`, is_dir: false, size: 1200, modified_at: Date.now() },
+    ],
+  };
+}
+
+export async function fs_read_file(
+  path: string,
+  startLine: number = 1,
+  lineCount: number = 500
+): Promise<{ path: string; lines: Array<{ line: number; content: string }>; totalLines: number; content: string }> {
+  if (isRunningInTauri() && invoke) {
+    try {
+      const endLine = startLine + lineCount - 1;
+      const res: any = await invoke('cmd_fs_read_file', {
+        filePath: path,
+        file_path: path,
+        startLine,
+        start_line: startLine,
+        endLine,
+        end_line: endLine,
+      });
+      const content = res.content || '';
+      const rawLines = content.split(/\r?\n/);
+      const lines = rawLines.map((lineText: string, idx: number) => ({
+        line: (res.start_line ?? startLine) + idx,
+        content: lineText,
+      }));
+      return {
+        path: res.file_path || path,
+        lines,
+        totalLines: res.total_lines ?? lines.length,
+        content,
+      };
+    } catch (err: any) {
+      throw new Error(err?.message || String(err) || 'Failed to read file');
+    }
+  }
+  const mockLines = [
+    { line: 1, content: `// File: ${path}` },
+    { line: 2, content: `// Workspace file content mock for preview` },
+  ];
+  return {
+    path,
+    lines: mockLines,
+    totalLines: 2,
+    content: mockLines.map((l) => l.content).join('\n'),
+  };
+}
+
+export async function fs_write_or_edit_file(
+  path: string,
+  content: string,
+  editMode: 'overwrite' | 'replace_lines' | 'append' = 'overwrite',
+  startLine?: number,
+  endLine?: number
+): Promise<{ success: boolean; path: string; bytesWritten: number; message: string }> {
+  // Pre-edit zero-commit Git snapshot for 1-click rollback via TimeTravel slider
+  try {
+    await createSnapshot(`Pre-edit AI snapshot: ${path}`);
+  } catch (snapErr) {
+    console.warn('Pre-edit snapshot warning:', snapErr);
+  }
+
+  if (isRunningInTauri() && invoke) {
+    try {
+      const res: any = await invoke('cmd_fs_write_or_edit_file', {
+        filePath: path,
+        file_path: path,
+        operation: editMode,
+        content,
+      });
+      globalState.obsidianRefreshTick += 1;
+      notify();
+      return {
+        success: true,
+        path: res.file_path || path,
+        bytesWritten: res.bytes_written ?? content.length,
+        message: 'File written successfully',
+      };
+    } catch (err: any) {
+      throw new Error(err?.message || String(err) || 'Failed to write file');
+    }
+  }
+
+  globalState.obsidianRefreshTick += 1;
+  notify();
+  return {
+    success: true,
+    path,
+    bytesWritten: content.length,
+    message: 'File written successfully (mock)',
+  };
+}
+
+export async function fs_delete_path(path: string): Promise<{ success: boolean; path: string; message: string }> {
+  try {
+    await createSnapshot(`Pre-delete AI snapshot: ${path}`);
+  } catch (snapErr) {
+    console.warn('Pre-delete snapshot warning:', snapErr);
+  }
+
+  if (isRunningInTauri() && invoke) {
+    try {
+      const res: any = await invoke('cmd_fs_delete_path', { filePath: path, file_path: path });
+      globalState.obsidianRefreshTick += 1;
+      notify();
+      return {
+        success: true,
+        path: typeof res === 'string' ? res : path,
+        message: 'Path deleted successfully',
+      };
+    } catch (err: any) {
+      throw new Error(err?.message || String(err) || 'Failed to delete path');
+    }
+  }
+
+  globalState.obsidianRefreshTick += 1;
+  notify();
+  return {
+    success: true,
+    path,
+    message: 'Path deleted successfully (mock)',
+  };
+}
+
+export async function executeAiToolCall(toolName: string, args: Record<string, any>): Promise<any> {
+  switch (toolName) {
+    case 'app_list_tabs_and_panes':
+      return app_list_tabs_and_panes();
+    case 'app_operate_tab':
+      return await app_operate_tab(
+        args.action,
+        args.tab_id || args.tabId,
+        args.title || args,
+        args.cli_type || args.cliType
+      );
+    case 'app_operate_pane':
+      return await app_operate_pane(
+        args.action,
+        args.pane_id || args.paneId,
+        args.cli_type || args.cliType || args
+      );
+    case 'pane_read_screen':
+      return await pane_read_screen(
+        args.pane_id || args.paneId,
+        args.line_count || args.lineCount || args.maxLines
+      );
+    case 'pane_send_input':
+      return await pane_send_input(
+        args.pane_id || args.paneId,
+        args.text,
+        args.submit_enter ?? args.submitEnter ?? args.appendNewline ?? true
+      );
+    case 'pane_send_keystroke':
+      return await pane_send_keystroke(
+        args.pane_id || args.paneId,
+        args.key || args.keystroke
+      );
+    case 'app_trigger_feature':
+      return await app_trigger_feature(
+        args.feature || args.featureName,
+        args.params || args.payload || args
+      );
+    case 'fs_list_directory':
+      return await fs_list_directory(
+        args.root_path || args.rootPath || args.path || '.',
+        args.max_depth || args.maxDepth || 3
+      );
+    case 'fs_read_file':
+      return await fs_read_file(
+        args.file_path || args.filePath || args.path,
+        args.start_line || args.startLine,
+        args.end_line || args.lineCount || args.line_count || 500
+      );
+    case 'fs_write_or_edit_file':
+      return await fs_write_or_edit_file(
+        args.file_path || args.filePath || args.path,
+        args.content,
+        args.operation || args.editMode || 'write',
+        args.start_line || args.startLine,
+        args.end_line || args.endLine
+      );
+    case 'fs_delete_path':
+      return await fs_delete_path(args.file_path || args.filePath || args.path);
+    default:
+      throw new Error(`Unknown AI tool: ${toolName}`);
+  }
+}
+
+export interface ExtractedToolCall {
+  name: string;
+  arguments: Record<string, any>;
+  raw: string;
+}
+
+export function extractToolCalls(content: string): ExtractedToolCall[] {
+  const calls: ExtractedToolCall[] = [];
+
+  const codeBlockRegex = /```(?:tool_call|tool|json)?\s*\n?([\s\S]*?)```/g;
+  let match: RegExpExecArray | null;
+  while ((match = codeBlockRegex.exec(content)) !== null) {
+    const raw = match[1].trim();
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        const name = parsed.name || parsed.tool || parsed.action || parsed.tool_name;
+        const args = parsed.arguments || parsed.args || parsed.parameters || parsed.payload || {};
+        if (name && typeof name === 'string') {
+          calls.push({ name, arguments: typeof args === 'object' ? args : {}, raw: match[0] });
+        }
+      }
+    } catch {}
+  }
+
+  const xmlRegex = /<tool_call(?:\s+name=["']([^"']+)["'])?>([\s\S]*?)<\/tool_call>/g;
+  while ((match = xmlRegex.exec(content)) !== null) {
+    const attrName = match[1];
+    const body = match[2].trim();
+    try {
+      const parsed = JSON.parse(body);
+      const name = attrName || parsed.name || parsed.tool || parsed.action;
+      const args = parsed.arguments || parsed.args || parsed.parameters || parsed;
+      if (name && typeof name === 'string') {
+        calls.push({ name, arguments: typeof args === 'object' ? args : {}, raw: match[0] });
+      }
+    } catch {
+      if (attrName) {
+        calls.push({ name: attrName, arguments: {}, raw: match[0] });
+      }
+    }
+  }
+
+  return calls;
+}
+
 export async function executeAiCommand(commandLine: string): Promise<{ handled: boolean; output?: string }> {
   const raw = commandLine.trim();
   if (!raw.startsWith('/')) {
@@ -3325,7 +4340,7 @@ export async function executeAiCommand(commandLine: string): Promise<{ handled: 
   if (root === 'help') {
     let out = `### Daftar Command AetherCortex AI\n\n`;
     for (const cmd of AI_COMMANDS) {
-      out += `- \`${cmd.syntax}\` — ${cmd.description}\n`;
+      out += `- \`${cmd.syntax}\`: ${cmd.description}\n`;
     }
     out += `\n*Tips: Ketik \`/\` pada kolom input untuk melihat daftar saran command secara langsung.*`;
     appendOutput(out);
@@ -3346,7 +4361,7 @@ export async function executeAiCommand(commandLine: string): Promise<{ handled: 
       const isCurrent = s.id === globalState.activeAiSessionId;
       const marker = isCurrent ? '**[AKTIF]** ' : '';
       const timeStr = new Date(s.updatedAt).toLocaleTimeString();
-      out += `${idx + 1}. ${marker}**${s.title}** — \`${s.messages.length} pesan\` (ID: \`${s.id}\`, diperbarui ${timeStr})\n`;
+      out += `${idx + 1}. ${marker}**${s.title}**: \`${s.messages.length} pesan\` (ID: \`${s.id}\`, diperbarui ${timeStr})\n`;
     });
     out += `\n*Gunakan \`/session switch <id_atau_nomor>\` untuk berpindah sesi.*`;
     appendOutput(out);
@@ -3489,6 +4504,109 @@ export async function executeAiCommand(commandLine: string): Promise<{ handled: 
     return { handled: true };
   }
 
+  if (root === 'app') {
+    if (sub === 'tabs' || sub === 'list' || !sub) {
+      const summary = app_list_tabs_and_panes();
+      let out = `### Workspace Tabs & Panes Overview\n\n`;
+      out += `- **Active Tab**: \`${summary.activeTabId || 'None'}\`\n`;
+      out += `- **Active Pane**: \`${summary.activePaneId || 'None'}\`\n`;
+      out += `- **Total Tabs**: ${summary.tabs.length}\n`;
+      out += `- **Total Panes**: ${summary.panes.length}\n\n`;
+      out += `#### Tabs\n`;
+      summary.tabs.forEach((t, i) => {
+        const activeMarker = t.id === summary.activeTabId ? ' (Active)' : '';
+        out += `${i + 1}. **${t.title}** [\`${t.id}\`]${activeMarker}\n`;
+      });
+      out += `\n#### Panes\n`;
+      summary.panes.forEach((p, i) => {
+        const activeMarker = p.id === summary.activePaneId ? ' (Focused)' : '';
+        out += `${i + 1}. **Pane [${p.id}]** - CLI: \`${p.cliType}\` | Status: \`${p.status}\` | Path: \`${p.worktreePath || '.'}\`${activeMarker}\n`;
+      });
+      appendOutput(out);
+      return { handled: true, output: out };
+    }
+  }
+
+  if (root === 'fs') {
+    if (sub === 'list') {
+      const targetPath = args || '.';
+      try {
+        const res = await fs_list_directory(targetPath, 2);
+        let out = `### Directory Listing: \`${targetPath}\`\n\n`;
+        const entries = res.entries || (Array.isArray(res) ? res : []);
+        if (Array.isArray(entries) && entries.length > 0) {
+          entries.forEach((e: any) => {
+            const kind = e.is_dir ? '[DIR]' : '[FILE]';
+            const sizeStr = typeof e.size === 'number' ? `(${e.size} bytes)` : '';
+            out += `- ${kind} **${e.name}** ${sizeStr}\n`;
+          });
+        } else {
+          out += `\`\`\`json\n${JSON.stringify(res, null, 2)}\n\`\`\``;
+        }
+        appendOutput(out);
+        return { handled: true, output: out };
+      } catch (err: any) {
+        appendOutput(`Gagal membaca direktori: ${err?.message || String(err)}`);
+        return { handled: true };
+      }
+    }
+
+    if (sub === 'read') {
+      const filePath = args || parts[2];
+      if (!filePath) {
+        appendOutput(`Sintaks salah. Contoh: \`/fs read src/main.rs\``);
+        return { handled: true };
+      }
+      try {
+        const res = await fs_read_file(filePath, 1, 100);
+        let out = `### File: \`${filePath}\` (${res.totalLines} baris)\n\n\`\`\`\n`;
+        res.lines.forEach((l) => {
+          out += `${String(l.line).padStart(4, ' ')} | ${l.content}\n`;
+        });
+        out += `\`\`\``;
+        appendOutput(out);
+        return { handled: true, output: out };
+      } catch (err: any) {
+        appendOutput(`Gagal membaca file: ${err?.message || String(err)}`);
+        return { handled: true };
+      }
+    }
+  }
+
+  if (root === 'pane') {
+    if (sub === 'read') {
+      const targetPane = args || globalState.activePaneId || globalState.panes[0]?.id;
+      try {
+        const screen = await pane_read_screen(targetPane, 30);
+        let out = `### Terminal Screen: \`${screen.paneId}\`\n\n\`\`\`\n`;
+        out += screen.lines.join('\n');
+        out += `\n\`\`\``;
+        appendOutput(out);
+        return { handled: true, output: out };
+      } catch (err: any) {
+        appendOutput(`Gagal membaca screen pane: ${err?.message || String(err)}`);
+        return { handled: true };
+      }
+    }
+
+    if (sub === 'send') {
+      const paneId = parts[2];
+      const cmdText = parts.slice(3).join(' ').trim();
+      if (!paneId || !cmdText) {
+        appendOutput(`Sintaks salah. Contoh: \`/pane send terminal-1 cargo check\``);
+        return { handled: true };
+      }
+      const approval = await checkAndApproveAction('pane_send_input', { paneId, text: cmdText });
+      if (!approval.approved) {
+        appendOutput(`Perintah dibatalkan oleh Security Gatekeeper: ${approval.rejectReason || 'Ditolak oleh user'}`);
+        return { handled: true };
+      }
+      await pane_send_input(paneId, cmdText, true);
+      appendOutput(`Perintah \`${cmdText}\` berhasil dikirim ke \`${paneId}\`.`);
+      return { handled: true };
+    }
+  }
+
   appendOutput(`Command \`/${root}\` tidak dikenali. Ketik \`/help\` untuk melihat daftar command yang tersedia.`);
   return { handled: true };
 }
@@ -3562,6 +4680,21 @@ export function insertTerminalContextToAi(paneId?: string): void {
 
 function generateMockAiResponse(prompt: string, provider: string, model: string): string {
   const lower = prompt.toLowerCase();
+  if ((lower.includes('tab') || lower.includes('pane')) && (lower.includes('list') || lower.includes('show') || lower.includes('inspect'))) {
+    return `### Workspace Inspection\n\nI will inspect the active tabs and panes across the workspace.\n\n\`\`\`tool_call\n{\n  "name": "app_list_tabs_and_panes",\n  "arguments": {}\n}\n\`\`\``;
+  }
+  if ((lower.includes('file') || lower.includes('dir')) && (lower.includes('list') || lower.includes('show') || lower.includes('tree') || lower.includes('explore') || lower.includes('scan'))) {
+    return `### Filesystem Directory Inspection\n\nI will scan the workspace directory.\n\n\`\`\`tool_call\n{\n  "name": "fs_list_directory",\n  "arguments": {\n    "path": ".",\n    "maxDepth": 2\n  }\n}\n\`\`\``;
+  }
+  if (lower.includes('read screen') || lower.includes('terminal screen') || lower.includes('read pane') || lower.includes('scrollback')) {
+    return `### Terminal Screen Inspection\n\nI will read the scrollback buffer from the terminal pane.\n\n\`\`\`tool_call\n{\n  "name": "pane_read_screen",\n  "arguments": {\n    "maxLines": 50\n  }\n}\n\`\`\``;
+  }
+  if (lower.includes('write file') || lower.includes('create file') || lower.includes('save to file')) {
+    return `### Workspace File Modification\n\nI will write the file to the workspace.\n\n\`\`\`tool_call\n{\n  "name": "fs_write_or_edit_file",\n  "arguments": {\n    "path": "test_output.txt",\n    "content": "AetherTerminal AI verified output\\n",\n    "editMode": "overwrite"\n  }\n}\n\`\`\``;
+  }
+  if (lower.includes('delete file') || lower.includes('remove path') || lower.includes('fs delete')) {
+    return `### Workspace File Deletion\n\nI will delete the requested path.\n\n\`\`\`tool_call\n{\n  "name": "fs_delete_path",\n  "arguments": {\n    "path": "test_output.txt"\n  }\n}\n\`\`\``;
+  }
   if (lower.includes('git')) {
     return `### Git Command Recommendation\n\nHere is the recommended workflow for your repository:\n\n- Inspect status: verify uncommitted changes.\n- Check recent log: view branch history.\n\n\`\`\`bash\ngit status\ngit log --oneline -n 5\n\`\`\`\n\nRun the above commands in your active terminal pane.`;
   }
@@ -3653,13 +4786,15 @@ export async function sendAiMessage(prompt: string): Promise<void> {
     return;
   }
 
+  activeAiAbortController = new AbortController();
+  const effectiveSystemPrompt = getOmniAssistantSystemPrompt(session.systemPrompt);
+
   try {
     let assistantReply = '';
     if (isRunningInTauri()) {
       try {
-        // Collect multi-turn conversational history for the session
         const history: ChatHistoryEntry[] = session.messages
-          .slice(0, -1) // all except the one just pushed
+          .slice(0, -1)
           .filter((m) => m.role === 'user' || m.role === 'assistant')
           .map((m) => ({ role: m.role, content: m.content }));
 
@@ -3667,39 +4802,110 @@ export async function sendAiMessage(prompt: string): Promise<void> {
           provider,
           model,
           prompt: trimmed,
-          system_prompt: session.systemPrompt || 'You are AetherCortex AI Assistant. Be concise, direct, and actionable. Never overexplain, lecture, or add unnecessary preamble/postamble. Provide exact solutions, terminal commands, or answers directly without fluff.',
+          system_prompt: effectiveSystemPrompt,
           history,
         });
         assistantReply = typeof res === 'string' ? res : (res?.content || JSON.stringify(res));
       } catch (err: any) {
+        if (activeAiAbortController?.signal.aborted) return;
         throw new Error(err?.message || (typeof err === 'string' ? err : 'Tauri AI chat invocation failed.'));
       }
     } else {
-      // Realistic mock fallback for web preview and test environments
       await new Promise((resolve) => setTimeout(resolve, 20));
+      if (activeAiAbortController?.signal.aborted) return;
       assistantReply = generateMockAiResponse(trimmed, provider, model);
     }
+
+    if (activeAiAbortController?.signal.aborted) return;
 
     const latencyMs = Math.max(15, Date.now() - startTime);
     const estimatedTokens = Math.max(18, Math.round((trimmed.length + assistantReply.length) / 4));
 
+    const calls = extractToolCalls(assistantReply);
+    let toolExecutionNotes = '';
+    const executedToolOutputs: string[] = [];
+    const executionCards: Array<{ key: string; value: string }> = [
+      { key: 'Provider', value: provider },
+      { key: 'Model', value: model },
+      { key: 'Tokens', value: String(estimatedTokens) },
+      { key: 'Latency', value: `${latencyMs}ms` },
+      { key: 'Status', value: '200 OK' },
+    ];
+
+    if (calls.length > 0) {
+      for (const call of calls) {
+        if (activeAiAbortController?.signal.aborted) break;
+
+        const check = await checkAndApproveAction(call.name, call.arguments);
+        if (activeAiAbortController?.signal.aborted) break;
+
+        if (!check.approved) {
+          toolExecutionNotes += `\n\n> **Security Gatekeeper**: Tool \`${call.name}\` was blocked. Reason: *${check.rejectReason || 'Action rejected by user'}*`;
+          executionCards.push({ key: `Tool: ${call.name}`, value: 'Rejected by User' });
+        } else {
+          try {
+            const toolResult = await executeAiToolCall(call.name, call.arguments);
+            const resSnippet = JSON.stringify(toolResult);
+            executedToolOutputs.push(`Tool: ${call.name}\n${resSnippet}`);
+            const displaySnippet = resSnippet.length > 300 ? resSnippet.slice(0, 300) + '...' : resSnippet;
+            toolExecutionNotes += `\n\n**Tool Executed**: \`${call.name}\`\n\`\`\`json\n${displaySnippet}\n\`\`\``;
+            executionCards.push({ key: `Tool: ${call.name}`, value: 'Executed' });
+          } catch (execErr: any) {
+            toolExecutionNotes += `\n\n> **Tool Error** (\`${call.name}\`): ${execErr?.message || String(execErr)}`;
+            executionCards.push({ key: `Tool: ${call.name}`, value: 'Execution Error' });
+          }
+        }
+      }
+    }
+
+    if (activeAiAbortController?.signal.aborted) return;
+
+    // Follow-up synthesis if assistant output was purely a tool call block and in Tauri
+    const cleanReplyWithoutToolCalls = assistantReply
+      .replace(/```(?:tool_call|tool|json)?\s*\n?[\s\S]*?```/g, '')
+      .replace(/<tool_call[\s\S]*?<\/tool_call>/g, '')
+      .trim();
+
+    if (
+      cleanReplyWithoutToolCalls.length < 50 &&
+      executedToolOutputs.length > 0 &&
+      isRunningInTauri() &&
+      !activeAiAbortController?.signal.aborted
+    ) {
+      try {
+        const followUpHistory: ChatHistoryEntry[] = session.messages
+          .filter((m) => m.role === 'user' || m.role === 'assistant')
+          .map((m) => ({ role: m.role, content: m.content }));
+
+        const followUpRes = await invoke('cmd_ai_chat', {
+          provider,
+          model,
+          prompt: `Tool results:\n${executedToolOutputs.join('\n\n')}\n\nPlease summarize these findings and conclude concisely.`,
+          system_prompt: effectiveSystemPrompt,
+          history: followUpHistory,
+        });
+        const followUpText = typeof followUpRes === 'string' ? followUpRes : (followUpRes?.content || '');
+        if (followUpText.trim() && !activeAiAbortController?.signal.aborted) {
+          toolExecutionNotes += `\n\n${followUpText.trim()}`;
+        }
+      } catch {}
+    }
+
+    if (activeAiAbortController?.signal.aborted) return;
+
+    const finalContent = assistantReply + toolExecutionNotes;
+
     const assistantMsg: AiMessage = {
       id: `msg_asst_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       role: 'assistant',
-      content: assistantReply,
+      content: finalContent,
       timestamp: Date.now(),
       metadata: {
         provider,
         model,
         tokens: estimatedTokens,
         latencyMs,
-        cards: [
-          { key: 'Provider', value: provider },
-          { key: 'Model', value: model },
-          { key: 'Tokens', value: String(estimatedTokens) },
-          { key: 'Latency', value: `${latencyMs}ms` },
-          { key: 'Status', value: '200 OK' },
-        ],
+        cards: executionCards,
       },
     };
 
@@ -3712,6 +4918,8 @@ export async function sendAiMessage(prompt: string): Promise<void> {
     persistAiSessions();
     notify();
   } catch (err: any) {
+    if (activeAiAbortController?.signal.aborted) return;
+
     const errorMsg = err?.message || String(err) || 'Failed to complete AI request.';
     globalState.aiError = errorMsg;
     globalState.aiLoading = false;
@@ -3737,6 +4945,9 @@ export async function sendAiMessage(prompt: string): Promise<void> {
     globalState.aiMessages = session.messages;
     persistAiSessions();
     notify();
+  } finally {
+    activeAiAbortController = null;
+    globalState.aiLoading = false;
   }
 }
 
